@@ -1,5 +1,6 @@
 package com.flechazo.rememoryusagebar;
 
+import com.sun.management.OperatingSystemMXBean;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
@@ -10,26 +11,38 @@ import net.minecraftforge.client.event.RenderGuiOverlayEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.lang.management.ManagementFactory;
+
 /**
  * Re-MemoryUsageBar Mod主类
- * 在游戏HUD上显示内存使用情况
+ * 在游戏HUD上显示系统资源使用情况
  * @author Flechazo
  */
 @Mod(ReMemoryUsageBar.MODID)
 public class ReMemoryUsageBar {
     public static final String MODID = "rememoryusagebar";
     private static final Logger LOGGER = LoggerFactory.getLogger(MODID);
+    private final OperatingSystemMXBean osBean;
 
     public ReMemoryUsageBar() {
         IEventBus modEventBus = FMLJavaModLoadingContext.get().getModEventBus();
         MinecraftForge.EVENT_BUS.register(this);
         modEventBus.addListener(this::clientSetup);
+        
+        // 注册配置
+        ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, Config.COMMON_CONFIG);
+        
+        // 初始化系统监控
+        osBean = (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
+        
         LOGGER.info("MemoryUsageBar Mod Load!");
     }
 
@@ -43,25 +56,7 @@ public class ReMemoryUsageBar {
     }
 
     /**
-     * 获取内存条的颜色
-     * @param usedMemory 已使用内存
-     * @param maxMemory 最大内存
-     * @return 颜色值
-     */
-    @OnlyIn(Dist.CLIENT)
-    private int getHealthBarColor(long usedMemory, long maxMemory) {
-        float percentage = (float) usedMemory / (float) maxMemory;
-        if (percentage < 0.2) {
-            return 0xFF00FF00; // 绿色
-        } else if (percentage < 0.5) {
-            return 0xFFFF8000; // 橙色
-        } else {
-            return 0xFFFF0000; // 红色
-        }
-    }
-
-    /**
-     * 渲染内存使用条
+     * 渲染资源使用条
      * @param event GUI渲染事件
      */
     @OnlyIn(Dist.CLIENT)
@@ -73,34 +68,72 @@ public class ReMemoryUsageBar {
         if (player == null) return;
         
         GuiGraphics guiGraphics = event.getGuiGraphics();
-        Runtime runtime = Runtime.getRuntime();
-        long usedMemory = runtime.totalMemory() - runtime.freeMemory();
-        
-        // 内存使用量变量
+        int screenWidth = minecraft.getWindow().getGuiScaledWidth();
         int screenHeight = minecraft.getWindow().getGuiScaledHeight();
+        
+        // 基础位置
+        int baseX = 10;
+        int baseY = screenHeight - 25;
+        int spacing = Config.INSTANCE.barSpacing.get();
+
+        // 根据配置决定渲染顺序
+        boolean memoryOnTop = Config.INSTANCE.memoryOnTop.get();
+        int memoryY = memoryOnTop ? baseY : baseY + spacing;
+        int cpuY = memoryOnTop ? baseY + spacing : baseY;
+        
+        // 渲染内存使用率
+        if (Config.INSTANCE.showMemory.get()) {
+            Runtime runtime = Runtime.getRuntime();
+            long usedMemory = runtime.totalMemory() - runtime.freeMemory();
+            double memoryUsage = (double) usedMemory / runtime.maxMemory();
+            renderUsageBar(guiGraphics, minecraft.font, screenWidth, screenHeight,
+                    baseX, memoryY, memoryUsage, "MEM");
+        }
+        
+        // 渲染CPU使用率
+        if (Config.INSTANCE.showCPU.get()) {
+            double cpuUsage = osBean.getProcessCpuLoad();
+            if (cpuUsage >= 0) { // 小于0表示不可用
+                renderUsageBar(guiGraphics, minecraft.font, screenWidth, screenHeight,
+                        baseX, cpuY, cpuUsage, "CPU");
+            }
+        }
+    }
+
+    /**
+     * 渲染单个使用率条
+     * @param guiGraphics GUI渲染上下文
+     * @param font 字体渲染器
+     * @param screenWidth 屏幕宽度
+     * @param screenHeight 屏幕高度
+     * @param barX 条形图X坐标
+     * @param barY 条形图Y坐标
+     * @param usage 使用率
+     * @param label 标签
+     */
+    private void renderUsageBar(GuiGraphics guiGraphics, Font font, int screenWidth, int screenHeight,
+                              int barX, int barY, double usage, String label) {
         int barWidth = 90;
         int barHeight = 5;
-        int barX = 10;
-        int barY = screenHeight - 10;
         
-        // 计算内存使用百分比
-        int memoryBarWidth = (int) ((float) usedMemory / (float) runtime.maxMemory() * (barWidth - 2));
-        int memoryBarColor = getHealthBarColor(usedMemory, runtime.maxMemory());
-        String memoryUsagePercentage = String.format("%.0f%%", (double)usedMemory / (double)runtime.maxMemory() * 100.0);
+        // 计算使用率
+        int usageBarWidth = (int) (usage * (barWidth - 2));
+        int usageBarColor = Config.INSTANCE.getUsageColor(usage);
+        String usagePercentage = String.format("%s: %.0f%%", label, usage * 100.0);
         
-        Font font = minecraft.font;
-        int percentageX = barX + memoryBarWidth - font.width(memoryUsagePercentage) / 2;
+        // 计算文本位置
+        int percentageX = barX;
         int percentageY = barY - font.lineHeight - 1;
         
         // 绘制背景
         guiGraphics.fill(barX + 1, barY - 1, barX + 100, barY + barHeight + 1, 0x80000000);
-        guiGraphics.fill(barX - 1, barY - 1, barX + memoryBarWidth + 1, barY + barHeight + 1, 0x80000000);
+        guiGraphics.fill(barX - 1, barY - 1, barX + usageBarWidth + 1, barY + barHeight + 1, 0x80000000);
         
-        // 绘制内存条
-        guiGraphics.fill(barX, barY, barX + memoryBarWidth, barY + barHeight, memoryBarColor);
-        guiGraphics.fill(barX + 1, barY + 1, barX + memoryBarWidth + 1, barY + barHeight - 1, memoryBarColor);
+        // 绘制使用率条
+        guiGraphics.fill(barX, barY, barX + usageBarWidth, barY + barHeight, usageBarColor);
+        guiGraphics.fill(barX + 1, barY + 1, barX + usageBarWidth + 1, barY + barHeight - 1, usageBarColor);
         
-        // 绘制百分比文本
-        guiGraphics.drawString(font, memoryUsagePercentage, percentageX, percentageY, 0xFFFFFFFF, true);
+        // 绘制文本
+        guiGraphics.drawString(font, usagePercentage, percentageX, percentageY, 0xFFFFFFFF, true);
     }
 }
